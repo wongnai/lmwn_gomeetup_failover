@@ -9,22 +9,27 @@ import (
 )
 
 func RunHealthCheck(mongo *db.MongoDB, rabbitmq *queue.RabbitMQ) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		isLowMem, err := memlimit.IsInLowMemory(memlimit.ProvideMemoryGetter(), true, 80)
+
+		if (mongo != nil && !mongo.IsConnected()) ||
+			(rabbitmq != nil && !rabbitmq.IsConnected()) ||
+			(isLowMem || err != nil) {
+
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status": "unhealthy"}`))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "healthy"}`))
+	})
+
 	srv := &http.Server{
-		Addr: ":18080",
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			isLowMem, err := memlimit.IsInLowMemory(memlimit.ProvideMemoryGetter(), true, 80)
-
-			if (mongo != nil && !mongo.IsConnected()) ||
-				(rabbitmq != nil && !rabbitmq.IsConnected()) ||
-				(isLowMem || err != nil) {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte("{\"status\": \"unhealthy\"}"))
-				return
-			}
-
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("{\"status\": \"healthy\"}"))
-		}),
+		Addr:    ":18080",
+		Handler: mux,
 	}
 
 	go func() {

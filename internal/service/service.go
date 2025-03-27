@@ -146,15 +146,19 @@ func (s *Service) CreateOrder(param string) (orderID string, err error) {
 
 	s.wg.Add(1)
 	safe.GoFunc(func() {
+		s.wg.Done()
 		s.doPayment(param)
 	})
 
 	s.wg.Add(1)
 	safe.GoFunc(func() {
+		s.wg.Done()
 		s.sendNotification(param)
 	})
 
+	s.wg.Add(1)
 	safe.GoFunc(func() {
+		s.wg.Done()
 		s.rmq.Publish("routingKey", "msgID", "eventName", []byte(fmt.Sprintf(`{"orderId":%s, "status":"created"}`, orderID)), nil)
 	})
 

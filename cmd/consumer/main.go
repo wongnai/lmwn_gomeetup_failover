@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,7 +28,9 @@ func main() {
 	}
 
 	// Step 2: Start main business logic (HTTP Server)
-	StartConsumer(rmq, svc)
+	ctx, cancelConsumer := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
+	StartConsumer(ctx, wg, rmq, svc)
 
 	// Step 3: Start Health Check Server
 	health.RunHealthCheck(mongo, rmq)
@@ -40,6 +43,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	cancelConsumer() // Cancel the context to stop consumers
+	wg.Wait()        // Wait for all goroutines to finish
+
 	rmq.Stop(shutdownCtx)
 	svc.Shutdown(shutdownCtx)
 	mongo.Close(shutdownCtx)
@@ -47,37 +53,59 @@ func main() {
 	log.Println("Consumer shutdown complete.")
 }
 
-func StartConsumer(rmq *queue.RabbitMQ, svc *service.Service) {
+func StartConsumer(ctx context.Context, wg *sync.WaitGroup, rmq *queue.RabbitMQ, svc *service.Service) {
 	deliveries, err := rmq.GetConsumerChannel()
 	if err != nil {
 		log.Fatalf("Failed to start consumer: %v", err)
 	}
+
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("Recovered from panic in consumer: %v", r)
 			}
 		}()
-		for msg := range deliveries {
-			log.Printf("Received message: %s", msg.Body)
-			if svc.IsMessageProcessed(string(msg.Body)) { // Check if already processed
-				log.Println("Skipping duplicate message")
-				msg.Ack(false)
-				continue
-			}
 
-			if err := svc.ProcessMessage(context.Background(), string(msg.Body)); err != nil {
-				log.Printf("Error processing message: %v", err)
-				msg.Nack(false, true) // Requeue the message in case of failure
-			} else {
-				msg.Ack(false) // Acknowledge successful processing
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Context cancelled, stopping consumer...")
+				return
+			case msg, ok := <-deliveries:
+				if !ok {
+					log.Println("Delivery channel closed, attempting reconnect...")
+					// Try reconnecting only if context is not done
+					select {
+					case <-ctx.Done():
+						log.Println("Shutdown in progress, skipping reconnect.")
+						return
+					default:
+						rmq.Reconnect()
+						StartConsumer(ctx, wg, rmq, svc)
+						return
+					}
+				}
+
+				log.Printf("Received message: %s", msg.Body)
+
+				if svc.IsMessageProcessed(string(msg.Body)) {
+					log.Println("Skipping duplicate message")
+					msg.Ack(false)
+					continue
+				}
+
+				if err := svc.ProcessMessage(ctx, string(msg.Body)); err != nil {
+					log.Printf("Error processing message: %v", err)
+					msg.Nack(false, true)
+				} else {
+					msg.Ack(false)
+				}
 			}
 		}
-
-		log.Println("Consumer stopped receiving messages, attempting reconnect...")
-		rmq.Reconnect()
-		StartConsumer(rmq, svc)
 	}()
 
-	log.Print("start consumer successful")
+	log.Print("Consumer started successfully")
 }

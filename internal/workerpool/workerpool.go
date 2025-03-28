@@ -9,6 +9,7 @@ import (
 type WorkerPool struct {
 	taskQueue chan func()
 	wg        sync.WaitGroup
+	once      sync.Once
 }
 
 // NewWorkerPool initializes a worker pool with a fixed number of workers
@@ -41,6 +42,8 @@ func (wp *WorkerPool) Submit(task func()) {
 
 // Shutdown gracefully stops the worker pool
 func (wp *WorkerPool) Shutdown() {
-	close(wp.taskQueue)
+	wp.once.Do(func() {
+		close(wp.taskQueue)
+	})
 	wp.wg.Wait()
 }
